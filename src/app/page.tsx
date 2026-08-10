@@ -92,7 +92,7 @@ const SUBSCRIBE_STEP_RUNS = gql`
 export default function Home() {
   const [orgs, setOrgs] = useState<any[]>([])
   const [selectedOrg, setSelectedOrg] = useState<any>(null)
-  const [selectedUser, setSelectedUser] = useState<string>('user-owner-a')
+  const [selectedUser, setSelectedUser] = useState<string>('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
   const [selectedRole, setSelectedRole] = useState<string>('owner')
   const [activeRun, setActiveRun] = useState<string | null>(null)
   const [stepRuns, setStepRuns] = useState<any[]>([])
@@ -101,7 +101,6 @@ export default function Home() {
   const [runLoading, setRunLoading] = useState(false)
   const [message, setMessage] = useState('')
 
-  // Predefined users for demo
   const users = [
     { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: 'Alice (Owner - Org A)', role: 'owner', org: '11111111-1111-1111-1111-111111111111' },
     { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'Bob (Editor - Org A)', role: 'editor', org: '11111111-1111-1111-1111-111111111111' },
@@ -113,10 +112,18 @@ export default function Home() {
     loadOrgs()
   }, [])
 
-  // Subscribe to step runs when active run changes
+  // Auto-select first org after orgs load
+  useEffect(() => {
+    if (orgs.length > 0 && !selectedOrg) {
+      const firstUser = users[0]
+      const org = orgs.find(o => o.id === firstUser.org)
+      if (org) setSelectedOrg(org)
+    }
+  }, [orgs])
+
   useEffect(() => {
     if (!activeRun) return
-    const subscription = apolloClient.subscribe<any>({
+    const subscription = apolloClient.subscribe({
       query: SUBSCRIBE_STEP_RUNS,
       variables: { workflow_run_id: activeRun }
     }).subscribe({
@@ -130,22 +137,27 @@ export default function Home() {
 
   const loadOrgs = async () => {
     try {
-      const { data } = await apolloClient.query<any>({
-      query: GET_ORGS,
-      fetchPolicy: 'network-only'
-      })
+      const { data } = await apolloClient.query({ query: GET_ORGS, fetchPolicy: 'network-only' })
       setOrgs(data.organizations)
+      return data.organizations
     } catch (err) {
       console.error('Error loading orgs:', err)
+      return []
     }
   }
 
-  const handleUserSwitch = (userId: string) => {
+  const handleUserSwitch = async (userId: string) => {
     const user = users.find(u => u.id === userId)
     if (user) {
       setSelectedUser(userId)
       setSelectedRole(user.role)
-      const org = orgs.find(o => o.id === user.org)
+      // Try finding in current orgs first
+      let org = orgs.find(o => o.id === user.org)
+      if (!org) {
+        // Reload orgs and try again
+        const freshOrgs = await loadOrgs()
+        org = freshOrgs.find((o: any) => o.id === user.org)
+      }
       setSelectedOrg(org || null)
       setMessage(`Switched to ${user.name}`)
       setTimeout(() => setMessage(''), 3000)
@@ -161,7 +173,7 @@ export default function Home() {
     }
     setLoading(true)
     try {
-      const { data } = await apolloClient.mutate<any>({
+      const { data } = await apolloClient.mutate({
         mutation: CREATE_WORKFLOW,
         variables: {
           name: newWorkflowName,
@@ -171,7 +183,6 @@ export default function Home() {
       })
       const workflowId = data.insert_workflows_one.id
 
-      // Add default steps: llm_call, http_request, conditional_branch, approval_gate
       const steps = [
         { type: 'llm_call', order: 1, config: { prompt: 'Analyze this request and respond with JSON: {"action": "approve" or "reject", "reason": "your reason"}', model: 'llama3-8b-8192' } },
         { type: 'http_request', order: 2, config: { url: 'https://httpbin.org/post', method: 'POST' } },
@@ -187,13 +198,14 @@ export default function Home() {
         })
       }
 
-      // Add manual + webhook triggers
       await apolloClient.mutate({ mutation: ADD_TRIGGER, variables: { workflow_id: workflowId, trigger_type: 'manual' } })
       await apolloClient.mutate({ mutation: ADD_TRIGGER, variables: { workflow_id: workflowId, trigger_type: 'webhook' } })
 
       setNewWorkflowName('')
       setMessage('✅ Workflow created with 5 steps!')
-      await loadOrgs()
+      const freshOrgs = await loadOrgs()
+      const updatedOrg = freshOrgs.find((o: any) => o.id === selectedOrg.id)
+      if (updatedOrg) setSelectedOrg(updatedOrg)
     } catch (err: any) {
       setMessage('❌ Error: ' + err.message)
     }
@@ -208,7 +220,6 @@ export default function Home() {
       return
     }
 
-    // Check cross-org isolation
     const workflow = selectedOrg?.workflows?.find((w: any) => w.id === workflowId)
     if (!workflow) {
       setMessage('❌ Cross-org violation blocked! You cannot access this workflow.')
@@ -226,6 +237,7 @@ export default function Home() {
       const data = await res.json()
       if (data.run_id) {
         setActiveRun(data.run_id)
+        setStepRuns([])
         setMessage('✅ Workflow started! Watching live...')
       } else {
         setMessage('❌ ' + (data.error || 'Failed to start'))
@@ -234,7 +246,9 @@ export default function Home() {
       setMessage('❌ Error: ' + err.message)
     }
     setRunLoading(false)
-    await loadOrgs()
+    const freshOrgs = await loadOrgs()
+    const updatedOrg = freshOrgs.find((o: any) => o.id === selectedOrg?.id)
+    if (updatedOrg) setSelectedOrg(updatedOrg)
     setTimeout(() => setMessage(''), 4000)
   }
 
@@ -276,7 +290,6 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-white p-6">
-      {/* Header */}
       <div className="max-w-6xl mx-auto">
         <div className="flex items-center justify-between mb-8">
           <div>
@@ -292,7 +305,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Message Banner */}
         {message && (
           <div className={`mb-4 p-3 rounded-lg text-sm font-medium ${message.startsWith('❌') ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
             {message}
@@ -300,10 +312,7 @@ export default function Home() {
         )}
 
         <div className="grid grid-cols-12 gap-6">
-          {/* Left Panel */}
           <div className="col-span-4 space-y-4">
-
-            {/* User Switcher */}
             <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
               <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Switch User</h2>
               <div className="space-y-2">
@@ -319,7 +328,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Org Usage */}
             {selectedOrg && (
               <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
                 <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Org Quota</h2>
@@ -339,7 +347,6 @@ export default function Home() {
               </div>
             )}
 
-            {/* Create Workflow */}
             {selectedOrg && selectedRole !== 'viewer' && (
               <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
                 <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Create Workflow</h2>
@@ -360,7 +367,6 @@ export default function Home() {
               </div>
             )}
 
-            {/* Viewer restriction notice */}
             {selectedRole === 'viewer' && (
               <div className="bg-gray-900 rounded-xl p-4 border border-yellow-800">
                 <p className="text-yellow-400 text-sm">👁 Viewer mode — read only. Cannot create or trigger workflows.</p>
@@ -368,10 +374,7 @@ export default function Home() {
             )}
           </div>
 
-          {/* Main Panel */}
           <div className="col-span-8 space-y-4">
-
-            {/* Workflows */}
             {selectedOrg ? (
               <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
                 <h2 className="text-lg font-semibold mb-4">Workflows in {selectedOrg.name}</h2>
@@ -403,7 +406,6 @@ export default function Home() {
                           )}
                         </div>
 
-                        {/* Steps */}
                         <div className="flex gap-2 flex-wrap">
                           {workflow.workflow_steps?.sort((a: any, b: any) => a.step_order - b.step_order).map((step: any) => (
                             <div key={step.id} className="flex items-center gap-1">
@@ -417,7 +419,6 @@ export default function Home() {
                           ))}
                         </div>
 
-                        {/* Last run status */}
                         {workflow.workflow_runs?.[0] && (
                           <div className="mt-2 flex items-center gap-2">
                             <span className="text-xs text-gray-500">Last run:</span>
@@ -433,11 +434,10 @@ export default function Home() {
               </div>
             ) : (
               <div className="bg-gray-900 rounded-xl p-8 border border-gray-800 text-center">
-                <p className="text-gray-400">Select a user to see their organization's workflows</p>
+                <p className="text-gray-400">Loading organization data...</p>
               </div>
             )}
 
-            {/* Live Step Runs */}
             {activeRun && (
               <div className="bg-gray-900 rounded-xl p-4 border border-purple-800">
                 <h2 className="text-lg font-semibold mb-4 text-purple-300">
@@ -474,7 +474,6 @@ export default function Home() {
                           </div>
                         )}
 
-                        {/* Approval Gate */}
                         {sr.status === 'paused' && sr.workflow_step?.step_type === 'approval_gate' && (
                           <div className="mt-3 flex items-center gap-3">
                             <span className="text-yellow-400 text-sm">⏸ Awaiting approval</span>
@@ -497,19 +496,18 @@ export default function Home() {
               </div>
             )}
 
-            {/* Cross-org isolation demo */}
             <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
               <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Cross-Org Isolation Test</h2>
               <p className="text-xs text-gray-500 mb-3">Switch to Dave (Org B) and try to access Org A workflows — it will be blocked.</p>
               <div className="flex gap-2">
                 <button
-                  onClick={() => handleUserSwitch('user-owner-b')}
+                  onClick={() => handleUserSwitch('dddddddd-dddd-dddd-dddd-dddddddddddd')}
                   className="bg-red-800 hover:bg-red-700 text-white px-3 py-1.5 rounded text-sm"
                 >
                   Switch to Org B User
                 </button>
                 <button
-                  onClick={() => handleUserSwitch('user-owner-a')}
+                  onClick={() => handleUserSwitch('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')}
                   className="bg-purple-800 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-sm"
                 >
                   Switch back to Org A
