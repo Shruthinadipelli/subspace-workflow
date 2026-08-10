@@ -1,511 +1,62 @@
 'use client'
-import { useState, useEffect } from 'react'
+
+import { useEffect, useMemo, useState } from 'react'
 import { apolloClient } from '@/lib/apollo'
 import { gql } from '@apollo/client'
 
-const GET_ORGS = gql`
-  query GetOrgs {
-    organizations {
-      id
-      name
-      quota_allowed
-      quota_used
-      workflows {
-        id
-        name
-        workflow_runs(order_by: {started_at: desc}, limit: 1) {
-          id
-          status
-        }
-        workflow_steps {
-          id
-          step_type
-          step_order
-        }
-        workflow_triggers {
-          id
-          trigger_type
-        }
-      }
-    }
-  }
-`
+const GET_ORGS = gql`query GetOrgs { organizations { id name quota_allowed quota_used workflows { id name workflow_steps { id step_type step_order config } workflow_triggers { id trigger_type } workflow_runs(order_by: {started_at: desc}, limit: 1) { id status started_at } } } }`
+const GET_STEP_RUNS = gql`query GetStepRuns($workflow_run_id: uuid!) { step_runs(where: {workflow_run_id: {_eq: $workflow_run_id}}, order_by: {started_at: asc}) { id status output error attempt_count approved_by workflow_step { step_type step_order } } }`
+const CREATE_WORKFLOW = gql`mutation CreateWorkflow($name: String!, $org_id: uuid!, $user_id: uuid!) { insert_workflows_one(object: {name: $name, org_id: $org_id, created_by: $user_id}) { id } }`
+const ADD_STEP = gql`mutation AddStep($workflow_id: uuid!, $step_type: String!, $step_order: Int!, $config: jsonb!) { insert_workflow_steps_one(object: {workflow_id: $workflow_id, step_type: $step_type, step_order: $step_order, config: $config}) { id } }`
+const ADD_TRIGGER = gql`mutation AddTrigger($workflow_id: uuid!, $trigger_type: String!) { insert_workflow_triggers_one(object: {workflow_id: $workflow_id, trigger_type: $trigger_type}) { id } }`
 
-const CREATE_WORKFLOW = gql`
-  mutation CreateWorkflow($name: String!, $org_id: uuid!, $user_id: uuid!) {
-    insert_workflows_one(object: {
-      name: $name,
-      org_id: $org_id,
-      created_by: $user_id
-    }) {
-      id
-      name
-    }
-  }
-`
-
-const ADD_STEP = gql`
-  mutation AddStep($workflow_id: uuid!, $step_type: String!, $step_order: Int!, $config: jsonb!) {
-    insert_workflow_steps_one(object: {
-      workflow_id: $workflow_id,
-      step_type: $step_type,
-      step_order: $step_order,
-      config: $config
-    }) {
-      id
-      step_type
-    }
-  }
-`
-
-const ADD_TRIGGER = gql`
-  mutation AddTrigger($workflow_id: uuid!, $trigger_type: String!) {
-    insert_workflow_triggers_one(object: {
-      workflow_id: $workflow_id,
-      trigger_type: $trigger_type
-    }) {
-      id
-      trigger_type
-    }
-  }
-`
-
-const GET_STEP_RUNS = gql`
-  query GetStepRuns($workflow_run_id: uuid!) {
-    step_runs(where: {workflow_run_id: {_eq: $workflow_run_id}}, order_by: {started_at: asc}) {
-      id
-      status
-      input
-      output
-      error
-      attempt_count
-      approved_by
-      approved_at
-      workflow_step {
-        step_type
-        step_order
-      }
-    }
-  }
-`
+const users = [
+  { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: 'Alice Chen', role: 'owner', org: '11111111-1111-1111-1111-111111111111', initials: 'AC' },
+  { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'Bob Stone', role: 'editor', org: '11111111-1111-1111-1111-111111111111', initials: 'BS' },
+  { id: 'cccccccc-cccc-cccc-cccc-cccccccccccc', name: 'Carol Diaz', role: 'viewer', org: '11111111-1111-1111-1111-111111111111', initials: 'CD' },
+  { id: 'dddddddd-dddd-dddd-dddd-dddddddddddd', name: 'Dave Okafor', role: 'owner', org: '22222222-2222-2222-2222-222222222222', initials: 'DO' },
+]
+const stepMeta: Record<string, { label: string; tone: string; icon: string }> = {
+  llm_call: { label: 'LLM call', tone: 'violet', icon: 'AI' }, http_request: { label: 'HTTP request', tone: 'blue', icon: 'HTTP' }, conditional_branch: { label: 'Condition', tone: 'amber', icon: '?' }, approval_gate: { label: 'Approval gate', tone: 'rose', icon: 'PAUSE' }, db_write: { label: 'Database write', tone: 'emerald', icon: 'DB' }, notify: { label: 'Notify', tone: 'cyan', icon: 'MSG' },
+}
 
 export default function Home() {
   const [orgs, setOrgs] = useState<any[]>([])
-  const [selectedOrg, setSelectedOrg] = useState<any>(null)
-  const [selectedUser, setSelectedUser] = useState<string>('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
-  const [selectedRole, setSelectedRole] = useState<string>('owner')
-  const [activeRun, setActiveRun] = useState<string | null>(null)
+  const [userId, setUserId] = useState(users[0].id)
+  const [selectedWorkflow, setSelectedWorkflow] = useState<any>(null)
+  const [runId, setRunId] = useState<string | null>(null)
   const [stepRuns, setStepRuns] = useState<any[]>([])
-  const [newWorkflowName, setNewWorkflowName] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [runLoading, setRunLoading] = useState(false)
-  const [message, setMessage] = useState('')
-  const [runComplete, setRunComplete] = useState(false)
+  const [name, setName] = useState('')
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState(false)
+  const user = users.find((item) => item.id === userId) || users[0]
+  const org = orgs.find((item) => item.id === user.org)
+  const workflows = org?.workflows || []
+  const quota = org?.quota_allowed ? Math.min((org.quota_used / org.quota_allowed) * 100, 100) : 0
 
-  const users = [
-    { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: 'Alice (Owner - Org A)', role: 'owner', org: '11111111-1111-1111-1111-111111111111' },
-    { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'Bob (Editor - Org A)', role: 'editor', org: '11111111-1111-1111-1111-111111111111' },
-    { id: 'cccccccc-cccc-cccc-cccc-cccccccccccc', name: 'Carol (Viewer - Org A)', role: 'viewer', org: '11111111-1111-1111-1111-111111111111' },
-    { id: 'dddddddd-dddd-dddd-dddd-dddddddddddd', name: 'Dave (Owner - Org B)', role: 'owner', org: '22222222-2222-2222-2222-222222222222' },
-  ]
+  async function load() { try { const result = await apolloClient.query({ query: GET_ORGS, fetchPolicy: 'network-only' }); setOrgs((result.data as any).organizations || []) } catch { setNotice('Unable to reach the workflow data plane.') } }
+  useEffect(() => { load() }, [])
+  useEffect(() => { if (!selectedWorkflow || !workflows.some((item: any) => item.id === selectedWorkflow.id)) setSelectedWorkflow(workflows[0] || null) }, [orgs, userId])
+  useEffect(() => { if (!runId) return; const poll = async () => { const result = await apolloClient.query({ query: GET_STEP_RUNS, variables: { workflow_run_id: runId }, fetchPolicy: 'network-only' }); setStepRuns((result.data as any).step_runs || []) }; poll(); const timer = setInterval(poll, 1800); return () => clearInterval(timer) }, [runId])
 
-  useEffect(() => {
-    loadOrgs()
-  }, [])
-
-  useEffect(() => {
-    if (orgs.length > 0 && !selectedOrg) {
-      const firstUser = users[0]
-      const org = orgs.find((o: any) => o.id === firstUser.org)
-      if (org) setSelectedOrg(org)
-    }
-  }, [orgs])
-
-  // Poll for step run updates every 2 seconds
-  useEffect(() => {
-    if (!activeRun || runComplete) return
-    const interval = setInterval(async () => {
-      try {
-        const result = await apolloClient.query({
-          query: GET_STEP_RUNS,
-          variables: { workflow_run_id: activeRun },
-          fetchPolicy: 'network-only'
-        })
-        const data = result.data as any
-        if (data?.step_runs) {
-          setStepRuns(data.step_runs)
-          const allDone = data.step_runs.length > 0 && data.step_runs.every((sr: any) =>
-            sr.status === 'completed' || sr.status === 'failed'
-          )
-          if (allDone) {
-            setRunComplete(true)
-            setMessage('✅ Workflow completed!')
-            clearInterval(interval)
-            loadOrgs()
-          }
-        }
-      } catch (err) {
-        console.error('Poll error:', err)
-      }
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [activeRun, runComplete])
-
-  const loadOrgs = async () => {
-    try {
-      const result = await apolloClient.query({ query: GET_ORGS, fetchPolicy: 'network-only' })
-      const data = result.data as any
-      setOrgs(data.organizations)
-      return data.organizations
-    } catch (err) {
-      console.error('Error loading orgs:', err)
-      return []
-    }
+  async function createWorkflow() {
+    if (!name.trim() || !org || user.role === 'viewer') return
+    setBusy(true); try { const result = await apolloClient.mutate({ mutation: CREATE_WORKFLOW, variables: { name: name.trim(), org_id: org.id, user_id: user.id } }); const id = (result.data as any).insert_workflows_one.id; const steps = [{ type: 'llm_call', config: { prompt: 'Classify this request as approve or reject.', model: 'llama3-8b-8192' } }, { type: 'http_request', config: { url: 'https://httpbin.org/post', method: 'POST' } }, { type: 'conditional_branch', config: { condition: 'output.action === approve' } }, { type: 'approval_gate', config: { required_role: 'owner' } }, { type: 'db_write', config: { table: 'workflow_runs' } }]; for (const [index, step] of steps.entries()) await apolloClient.mutate({ mutation: ADD_STEP, variables: { workflow_id: id, step_type: step.type, step_order: index + 1, config: step.config } }); for (const trigger of ['manual', 'webhook']) await apolloClient.mutate({ mutation: ADD_TRIGGER, variables: { workflow_id: id, trigger_type: trigger } }); setName(''); setNotice('Workflow created with 5 executable steps.'); await load() } catch (error: any) { setNotice(error.message || 'Workflow creation failed.') } finally { setBusy(false) }
   }
+  async function runWorkflow() { if (!selectedWorkflow || user.role === 'viewer') return; setBusy(true); setStepRuns([]); try { const response = await fetch('/api/trigger-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow_id: selectedWorkflow.id, user_id: user.id, org_id: org.id, role: user.role }) }); const data = await response.json(); if (data.run_id) { setRunId(data.run_id); setNotice('Run started. Progress is updating live.'); } else setNotice(data.error || 'Could not start run.') } catch { setNotice('Run request failed.') } finally { setBusy(false) } }
+  async function approve(id: string) { const response = await fetch('/api/approve-step', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ step_run_id: id, user_id: user.id, role: user.role }) }); const data = await response.json(); setNotice(data.success ? 'Approval recorded. Workflow resumed.' : data.error || 'Approval failed.'); }
+  const activeRunStatus = stepRuns.some((step) => step.status === 'paused') ? 'paused' : stepRuns.some((step) => step.status === 'running') ? 'running' : stepRuns.length > 0 && stepRuns.every((step) => step.status === 'completed') ? 'completed' : 'pending'
+  const selectedSteps = useMemo(() => [...(selectedWorkflow?.workflow_steps || [])].sort((a: any, b: any) => a.step_order - b.step_order), [selectedWorkflow])
 
-  const handleUserSwitch = async (userId: string) => {
-    const user = users.find(u => u.id === userId)
-    if (user) {
-      setSelectedUser(userId)
-      setSelectedRole(user.role)
-      let org = orgs.find((o: any) => o.id === user.org)
-      if (!org) {
-        const freshOrgs = await loadOrgs()
-        org = freshOrgs.find((o: any) => o.id === user.org)
-      }
-      setSelectedOrg(org || null)
-      setMessage(`Switched to ${user.name}`)
-      setTimeout(() => setMessage(''), 3000)
-    }
-  }
-
-  const createWorkflow = async () => {
-    if (!newWorkflowName || !selectedOrg) return
-    if (selectedRole === 'viewer') {
-      setMessage('❌ Viewers cannot create workflows!')
-      setTimeout(() => setMessage(''), 3000)
-      return
-    }
-    setLoading(true)
-    try {
-      const result = await apolloClient.mutate({
-        mutation: CREATE_WORKFLOW,
-        variables: { name: newWorkflowName, org_id: selectedOrg.id, user_id: selectedUser }
-      })
-      const data = result.data as any
-      const workflowId = data.insert_workflows_one.id
-
-      const steps = [
-        { type: 'llm_call', order: 1, config: { prompt: 'Analyze this request and respond with JSON: {"action": "approve", "reason": "your reason"}', model: 'llama3-8b-8192' } },
-        { type: 'http_request', order: 2, config: { url: 'https://httpbin.org/post', method: 'POST' } },
-        { type: 'conditional_branch', order: 3, config: { condition: 'output.action === "approve"', true_path: 'continue', false_path: 'stop' } },
-        { type: 'approval_gate', order: 4, config: { required_role: 'owner', message: 'Please approve to continue' } },
-        { type: 'db_write', order: 5, config: { table: 'workflow_runs', action: 'update_status' } },
-      ]
-
-      for (const step of steps) {
-        await apolloClient.mutate({
-          mutation: ADD_STEP,
-          variables: { workflow_id: workflowId, step_type: step.type, step_order: step.order, config: step.config }
-        })
-      }
-
-      await apolloClient.mutate({ mutation: ADD_TRIGGER, variables: { workflow_id: workflowId, trigger_type: 'manual' } })
-      await apolloClient.mutate({ mutation: ADD_TRIGGER, variables: { workflow_id: workflowId, trigger_type: 'webhook' } })
-
-      setNewWorkflowName('')
-      setMessage('✅ Workflow created with 5 steps!')
-      const freshOrgs = await loadOrgs()
-      const updatedOrg = freshOrgs.find((o: any) => o.id === selectedOrg.id)
-      if (updatedOrg) setSelectedOrg(updatedOrg)
-    } catch (err: any) {
-      setMessage('❌ Error: ' + err.message)
-    }
-    setLoading(false)
-    setTimeout(() => setMessage(''), 4000)
-  }
-
-  const triggerWorkflow = async (workflowId: string) => {
-    if (selectedRole === 'viewer') {
-      setMessage('❌ Viewers cannot trigger workflows!')
-      setTimeout(() => setMessage(''), 3000)
-      return
-    }
-    const workflow = selectedOrg?.workflows?.find((w: any) => w.id === workflowId)
-    if (!workflow) {
-      setMessage('❌ Cross-org violation blocked!')
-      setTimeout(() => setMessage(''), 4000)
-      return
-    }
-    setRunLoading(true)
-    setStepRuns([])
-    setRunComplete(false)
-    try {
-      const res = await fetch('/api/trigger-workflow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workflow_id: workflowId, user_id: selectedUser, role: selectedRole, org_id: selectedOrg.id })
-      })
-      const data = await res.json()
-      if (data.run_id) {
-        setActiveRun(data.run_id)
-        setMessage('✅ Workflow started!')
-        // Immediately fetch step runs
-        const result = await apolloClient.query({
-          query: GET_STEP_RUNS,
-          variables: { workflow_run_id: data.run_id },
-          fetchPolicy: 'network-only'
-        })
-        const srData = result.data as any
-        if (srData?.step_runs) setStepRuns(srData.step_runs)
-      } else {
-        setMessage('❌ ' + (data.error || 'Failed to start'))
-      }
-    } catch (err: any) {
-      setMessage('❌ Error: ' + err.message)
-    }
-    setRunLoading(false)
-    const freshOrgs = await loadOrgs()
-    const updatedOrg = freshOrgs.find((o: any) => o.id === selectedOrg?.id)
-    if (updatedOrg) setSelectedOrg(updatedOrg)
-    setTimeout(() => setMessage(''), 4000)
-  }
-
-  const approveStep = async (stepRunId: string) => {
-    if (selectedRole === 'viewer') {
-      setMessage('❌ Viewers cannot approve steps!')
-      setTimeout(() => setMessage(''), 3000)
-      return
-    }
-    try {
-      const res = await fetch('/api/approve-step', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ step_run_id: stepRunId, user_id: selectedUser, role: selectedRole })
-      })
-      const data = await res.json()
-      if (data.success) {
-        setRunComplete(false)
-        setMessage('✅ Step approved! Continuing...')
-      } else {
-        setMessage('❌ ' + (data.error || 'Approval failed'))
-      }
-    } catch (err: any) {
-      setMessage('❌ Error: ' + err.message)
-    }
-    setTimeout(() => setMessage(''), 4000)
-  }
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'completed': return 'bg-green-500'
-      case 'running': return 'bg-blue-500 animate-pulse'
-      case 'paused': return 'bg-yellow-500'
-      case 'failed': return 'bg-red-500'
-      default: return 'bg-gray-400'
-    }
-  }
-
-  const currentUser = users.find(u => u.id === selectedUser)
-
-  return (
-    <div className="min-h-screen bg-gray-950 text-white p-6">
-      <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-3xl font-bold text-purple-400">SubSpace Workflow Builder</h1>
-            <p className="text-gray-400 mt-1">AI Agent Workflow Orchestration Platform</p>
-          </div>
-          <div className="text-right">
-            <div className="text-sm text-gray-400">Logged in as</div>
-            <div className="font-semibold text-purple-300">{currentUser?.name}</div>
-            <div className={`text-xs px-2 py-0.5 rounded mt-1 inline-block ${selectedRole === 'owner' ? 'bg-purple-600' : selectedRole === 'editor' ? 'bg-blue-600' : 'bg-gray-600'}`}>
-              {selectedRole.toUpperCase()}
-            </div>
-          </div>
-        </div>
-
-        {message && (
-          <div className={`mb-4 p-3 rounded-lg text-sm font-medium ${message.startsWith('❌') ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
-            {message}
-          </div>
-        )}
-
-        <div className="grid grid-cols-12 gap-6">
-          <div className="col-span-4 space-y-4">
-            <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-              <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Switch User</h2>
-              <div className="space-y-2">
-                {users.map(user => (
-                  <button
-                    key={user.id}
-                    onClick={() => handleUserSwitch(user.id)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all ${selectedUser === user.id ? 'bg-purple-700 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
-                  >
-                    <div className="font-medium">{user.name}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {selectedOrg && (
-              <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-                <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Org Quota</h2>
-                <div className="text-lg font-bold text-white">{selectedOrg.name}</div>
-                <div className="mt-2">
-                  <div className="flex justify-between text-sm text-gray-400 mb-1">
-                    <span>Used</span>
-                    <span>{selectedOrg.quota_used} / {selectedOrg.quota_allowed}</span>
-                  </div>
-                  <div className="w-full bg-gray-700 rounded-full h-2">
-                    <div className="bg-purple-500 h-2 rounded-full transition-all" style={{ width: `${Math.min((selectedOrg.quota_used / selectedOrg.quota_allowed) * 100, 100)}%` }} />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {selectedOrg && selectedRole !== 'viewer' && (
-              <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-                <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Create Workflow</h2>
-                <input
-                  type="text"
-                  value={newWorkflowName}
-                  onChange={e => setNewWorkflowName(e.target.value)}
-                  placeholder="Workflow name..."
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 mb-3 focus:outline-none focus:border-purple-500"
-                />
-                <button
-                  onClick={createWorkflow}
-                  disabled={loading || !newWorkflowName}
-                  className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 text-white font-medium py-2 rounded-lg text-sm transition-all"
-                >
-                  {loading ? 'Creating...' : '+ Create Workflow'}
-                </button>
-              </div>
-            )}
-
-            {selectedRole === 'viewer' && (
-              <div className="bg-gray-900 rounded-xl p-4 border border-yellow-800">
-                <p className="text-yellow-400 text-sm">👁 Viewer mode — read only.</p>
-              </div>
-            )}
-          </div>
-
-          <div className="col-span-8 space-y-4">
-            {selectedOrg ? (
-              <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-                <h2 className="text-lg font-semibold mb-4">Workflows in {selectedOrg.name}</h2>
-                {selectedOrg.workflows?.length === 0 ? (
-                  <p className="text-gray-500 text-sm">No workflows yet. Create one!</p>
-                ) : (
-                  <div className="space-y-3">
-                    {selectedOrg.workflows?.map((workflow: any) => (
-                      <div key={workflow.id} className="bg-gray-800 rounded-xl p-4 border border-gray-700">
-                        <div className="flex items-center justify-between mb-3">
-                          <div>
-                            <h3 className="font-semibold text-white">{workflow.name}</h3>
-                            <div className="flex gap-2 mt-1">
-                              {workflow.workflow_triggers?.map((t: any) => (
-                                <span key={t.id} className="text-xs bg-gray-700 px-2 py-0.5 rounded text-gray-300">{t.trigger_type}</span>
-                              ))}
-                            </div>
-                          </div>
-                          {selectedRole !== 'viewer' && (
-                            <button
-                              onClick={() => triggerWorkflow(workflow.id)}
-                              disabled={runLoading}
-                              className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
-                            >
-                              {runLoading ? 'Starting...' : '▶ Run'}
-                            </button>
-                          )}
-                        </div>
-                        <div className="flex gap-2 flex-wrap">
-                          {workflow.workflow_steps?.sort((a: any, b: any) => a.step_order - b.step_order).map((step: any) => (
-                            <div key={step.id} className="flex items-center gap-1">
-                              <span className="text-xs bg-gray-700 border border-gray-600 px-2 py-1 rounded text-gray-300">
-                                {step.step_order}. {step.step_type}
-                              </span>
-                              {step.step_order < workflow.workflow_steps.length && <span className="text-gray-600 text-xs">→</span>}
-                            </div>
-                          ))}
-                        </div>
-                        {workflow.workflow_runs?.[0] && (
-                          <div className="mt-2 flex items-center gap-2">
-                            <span className="text-xs text-gray-500">Last run:</span>
-                            <span className={`text-xs px-2 py-0.5 rounded text-white ${getStatusColor(workflow.workflow_runs[0].status)}`}>
-                              {workflow.workflow_runs[0].status}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="bg-gray-900 rounded-xl p-8 border border-gray-800 text-center">
-                <p className="text-gray-400">Loading organization data...</p>
-              </div>
-            )}
-
-            {activeRun && stepRuns.length > 0 && (
-              <div className="bg-gray-900 rounded-xl p-4 border border-purple-800">
-                <h2 className="text-lg font-semibold mb-4 text-purple-300">
-                  Live Run Status
-                  {!runComplete && <span className="ml-2 inline-block w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>}
-                </h2>
-                <div className="space-y-2">
-                  {stepRuns.map((sr: any) => (
-                    <div key={sr.id} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className={`w-3 h-3 rounded-full ${getStatusColor(sr.status)}`} />
-                          <span className="text-sm font-medium">Step {sr.workflow_step?.step_order}: {sr.workflow_step?.step_type}</span>
-                        </div>
-                        <span className={`text-xs px-2 py-0.5 rounded text-white ${getStatusColor(sr.status)}`}>{sr.status}</span>
-                      </div>
-                      {sr.output && Object.keys(sr.output).length > 0 && (
-                        <div className="mt-2 text-xs text-gray-400 bg-gray-900 rounded p-2 font-mono">
-                          {JSON.stringify(sr.output, null, 2).slice(0, 200)}
-                        </div>
-                      )}
-                      {sr.error && (
-                        <div className="mt-2 text-xs text-red-400 bg-red-900/20 rounded p-2">Error: {sr.error}</div>
-                      )}
-                      {sr.status === 'paused' && sr.workflow_step?.step_type === 'approval_gate' && (
-                        <div className="mt-3 flex items-center gap-3">
-                          <span className="text-yellow-400 text-sm">⏸ Awaiting approval</span>
-                          {selectedRole !== 'viewer' ? (
-                            <button onClick={() => approveStep(sr.id)} className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded text-sm font-medium">
-                              ✓ Approve
-                            </button>
-                          ) : (
-                            <span className="text-red-400 text-xs">Viewers cannot approve</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-              <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Cross-Org Isolation Test</h2>
-              <p className="text-xs text-gray-500 mb-3">Switch to Dave (Org B) and try to access Org A workflows — it will be blocked.</p>
-              <div className="flex gap-2">
-                <button onClick={() => handleUserSwitch('dddddddd-dddd-dddd-dddd-dddddddddddd')} className="bg-red-800 hover:bg-red-700 text-white px-3 py-1.5 rounded text-sm">
-                  Switch to Org B User
-                </button>
-                <button onClick={() => handleUserSwitch('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')} className="bg-purple-800 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-sm">
-                  Switch back to Org A
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
+  return <main className="min-h-screen bg-background text-foreground"><div className="shell">
+    <aside className="sidebar"><div className="brand"><div className="brand-mark">S</div><div><strong>subspace</strong><span>workflow control</span></div></div><div className="side-label">Workspace</div><div className="org-switch"><span className="org-dot" />{org?.name || 'Loading workspace'}<span className="chevron">⌄</span></div><nav><a className="nav-active"><span>◈</span> Workflows <b>{workflows.length}</b></a><a><span>◌</span> Runs <b>12</b></a><a><span>◇</span> Approvals {stepRuns.some((step) => step.status === 'paused') && <i />}</a></nav><div className="side-label team-label">Team context</div><div className="user-list">{users.map((item) => <button key={item.id} onClick={() => setUserId(item.id)} className={item.id === userId ? 'user active' : 'user'}><span className="avatar">{item.initials}</span><span><strong>{item.name}</strong><small>{item.role}</small></span>{item.id === userId && <span className="check">✓</span>}</button>)}</div><div className="sidebar-footer"><span className="status-pulse" /> System operational<br /><small>Hasura + Workflow SDK</small></div></aside>
+    <section className="content"><header className="topbar"><div><p className="eyebrow">{org?.name || 'Organization'} / Operations</p><h1>Workflow control room</h1></div><div className="header-actions"><span className="live-chip"><span className="status-pulse" /> Live</span><span className="avatar avatar-large">{user.initials}</span><div><strong>{user.name}</strong><small>{user.role}</small></div></div></header>
+      {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')}>×</button></div>}
+      <div className="metrics"><div className="metric"><span className="metric-icon violet">◈</span><div><small>Active workflows</small><strong>{workflows.length}</strong></div><em>+2 this week</em></div><div className="metric"><span className="metric-icon blue">↗</span><div><small>Runs this month</small><strong>12</strong></div><em>+18%</em></div><div className="metric quota-card"><span className="metric-icon amber">◷</span><div><small>Monthly quota</small><strong>{org?.quota_used || 0} <small>/ {org?.quota_allowed || 100}</small></strong></div><div className="quota-bar"><span style={{ width: `${quota}%` }} /></div></div></div>
+      <div className="workspace-grid"><section className="panel workflows-panel"><div className="panel-heading"><div><p className="eyebrow">Orchestration</p><h2>Your workflows</h2></div>{user.role !== 'viewer' && <div className="create-row"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="New workflow name" /><button className="button primary" disabled={busy || !name.trim()} onClick={createWorkflow}>+ Create</button></div>}</div>{workflows.length === 0 ? <div className="empty">No workflows in this organization yet.</div> : <div className="workflow-list">{workflows.map((workflow: any) => <button key={workflow.id} onClick={() => setSelectedWorkflow(workflow)} className={selectedWorkflow?.id === workflow.id ? 'workflow-row selected' : 'workflow-row'}><span className="workflow-state" /><span className="workflow-copy"><strong>{workflow.name}</strong><small>{workflow.workflow_steps?.length || 0} steps <span>·</span> {workflow.workflow_triggers?.map((t: any) => t.trigger_type).join(' + ')}</small></span><span className={`badge ${workflow.workflow_runs?.[0]?.status || 'draft'}`}>{workflow.workflow_runs?.[0]?.status || 'draft'}</span><span className="row-arrow">›</span></button>)}</div>}</section>
+      <section className="panel detail-panel"><div className="panel-heading"><div><p className="eyebrow">Builder</p><h2>{selectedWorkflow?.name || 'Select a workflow'}</h2></div>{selectedWorkflow && user.role !== 'viewer' && <button className="button run" disabled={busy} onClick={runWorkflow}>Run workflow <span>↗</span></button>}</div>{selectedWorkflow ? <><div className="trigger-line"><span className="muted-label">Triggers</span>{selectedWorkflow.workflow_triggers?.map((t: any) => <span className="trigger" key={t.id}><span />{t.trigger_type}</span>)}<button className="add-trigger">+ Add trigger</button></div><div className="step-stack">{selectedSteps.map((step: any, index: number) => { const meta = stepMeta[step.step_type] || stepMeta.notify; const live = stepRuns.find((item) => item.workflow_step?.step_order === step.step_order); return <div className="step-wrap" key={step.id}><div className={`step-card ${live?.status || ''}`}><span className={`step-icon ${meta.tone}`}>{meta.icon}</span><span className="step-index">{String(index + 1).padStart(2, '0')}</span><div className="step-info"><strong>{meta.label}</strong><small>{step.config?.model || step.config?.url || step.config?.required_role || 'Configured action'}</small></div>{live ? <span className={`badge ${live.status}`}>{live.status}{live.attempt_count > 0 ? ` · ${live.attempt_count}x` : ''}</span> : <span className="badge pending">ready</span>}{live?.status === 'paused' && user.role !== 'viewer' && <button className="approve" onClick={() => approve(live.id)}>Approve</button>}</div>{index < selectedSteps.length - 1 && <div className="connector" />}</div>})}</div></> : <div className="empty">Choose a workflow from the list to inspect its execution graph.</div>}</section></div>
+      {runId && <section className="panel run-panel"><div className="panel-heading"><div><p className="eyebrow">Observability / {runId.slice(0, 8)}</p><h2>Live run timeline</h2></div><span className={`badge ${activeRunStatus}`}><span className="status-pulse" /> {activeRunStatus}</span></div><div className="timeline">{stepRuns.map((step) => <div className="timeline-item" key={step.id}><span className={`timeline-dot ${step.status}`} /><div><strong>Step {step.workflow_step?.step_order}: {step.workflow_step?.step_type}</strong><small>{step.error || (step.output ? JSON.stringify(step.output).slice(0, 120) : 'Waiting for execution')}</small></div><span className="timeline-time">{step.status}</span></div>)}</div></section>}
+      <footer><span>SubSpace Workflow Platform</span><span>Role-aware execution · quota protected · audit ready</span></footer>
+    </section>
+  </div></main>
 }

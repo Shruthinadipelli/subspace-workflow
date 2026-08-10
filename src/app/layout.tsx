@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'SubSpace Workflow Builder',
-  description: 'AI Agent Workflow Orchestration',
+  title: 'SubSpace — Workflow Control Room',
+  description: 'Role-aware AI workflow orchestration with live runs, approvals, and quota controls.',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
