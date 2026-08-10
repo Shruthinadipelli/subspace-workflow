@@ -16,16 +16,39 @@ async function hasuraQuery(query: string, variables: any = {}) {
 }
 
 async function updateStepRun(id: string, updates: any) {
-  const setFields = Object.entries(updates).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', ')
-  return hasuraQuery(`
-    mutation { update_step_runs_by_pk(pk_columns: {id: "${id}"}, _set: {${setFields}}) { id status } }
-  `)
+  const query = `
+    mutation UpdateStepRun($id: uuid!, $status: String!, $output: jsonb, $error: String, $completed_at: timestamptz, $attempt_count: Int) {
+      update_step_runs_by_pk(
+        pk_columns: {id: $id},
+        _set: {
+          status: $status,
+          output: $output,
+          error: $error,
+          completed_at: $completed_at,
+          attempt_count: $attempt_count
+        }
+      ) { id status }
+    }
+  `
+  return hasuraQuery(query, {
+    id,
+    status: updates.status || 'pending',
+    output: updates.output || null,
+    error: updates.error || null,
+    completed_at: updates.completed_at || null,
+    attempt_count: updates.attempt_count || 0
+  })
 }
-
 async function updateWorkflowRun(id: string, status: string) {
-  return hasuraQuery(`
-    mutation { update_workflow_runs_by_pk(pk_columns: {id: "${id}"}, _set: {status: "${status}", completed_at: "${new Date().toISOString()}"}) { id } }
-  `)
+  const query = `
+    mutation UpdateWorkflowRun($id: uuid!, $status: String!, $completed_at: timestamptz) {
+      update_workflow_runs_by_pk(
+        pk_columns: {id: $id},
+        _set: {status: $status, completed_at: $completed_at}
+      ) { id }
+    }
+  `
+  return hasuraQuery(query, { id, status, completed_at: new Date().toISOString() })
 }
 
 async function callGroq(prompt: string) {
