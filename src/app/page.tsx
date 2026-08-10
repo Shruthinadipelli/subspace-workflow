@@ -112,11 +112,10 @@ export default function Home() {
     loadOrgs()
   }, [])
 
-  // Auto-select first org after orgs load
   useEffect(() => {
     if (orgs.length > 0 && !selectedOrg) {
       const firstUser = users[0]
-      const org = orgs.find(o => o.id === firstUser.org)
+      const org = orgs.find((o: any) => o.id === firstUser.org)
       if (org) setSelectedOrg(org)
     }
   }, [orgs])
@@ -127,17 +126,18 @@ export default function Home() {
       query: SUBSCRIBE_STEP_RUNS,
       variables: { workflow_run_id: activeRun }
     }).subscribe({
-      next: ({ data }) => {
+      next: ({ data }: { data: any }) => {
         if (data?.step_runs) setStepRuns(data.step_runs)
       },
-      error: (err) => console.error('Subscription error:', err)
+      error: (err: any) => console.error('Subscription error:', err)
     })
     return () => subscription.unsubscribe()
   }, [activeRun])
 
   const loadOrgs = async () => {
     try {
-      const { data } = await apolloClient.query({ query: GET_ORGS, fetchPolicy: 'network-only' })
+      const result = await apolloClient.query({ query: GET_ORGS, fetchPolicy: 'network-only' })
+      const data = result.data as any
       setOrgs(data.organizations)
       return data.organizations
     } catch (err) {
@@ -151,10 +151,8 @@ export default function Home() {
     if (user) {
       setSelectedUser(userId)
       setSelectedRole(user.role)
-      // Try finding in current orgs first
-      let org = orgs.find(o => o.id === user.org)
+      let org = orgs.find((o: any) => o.id === user.org)
       if (!org) {
-        // Reload orgs and try again
         const freshOrgs = await loadOrgs()
         org = freshOrgs.find((o: any) => o.id === user.org)
       }
@@ -173,7 +171,7 @@ export default function Home() {
     }
     setLoading(true)
     try {
-      const { data } = await apolloClient.mutate({
+      const result = await apolloClient.mutate({
         mutation: CREATE_WORKFLOW,
         variables: {
           name: newWorkflowName,
@@ -181,6 +179,7 @@ export default function Home() {
           user_id: selectedUser
         }
       })
+      const data = result.data as any
       const workflowId = data.insert_workflows_one.id
 
       const steps = [
