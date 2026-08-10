@@ -103,10 +103,10 @@ export default function Home() {
 
   // Predefined users for demo
   const users = [
-    { id: 'user-owner-a', name: 'Alice (Owner - Org A)', role: 'owner', org: '11111111-1111-1111-1111-111111111111' },
-    { id: 'user-editor-a', name: 'Bob (Editor - Org A)', role: 'editor', org: '11111111-1111-1111-1111-111111111111' },
-    { id: 'user-viewer-a', name: 'Carol (Viewer - Org A)', role: 'viewer', org: '11111111-1111-1111-1111-222222222222' },
-    { id: 'user-owner-b', name: 'Dave (Owner - Org B)', role: 'owner', org: '22222222-2222-2222-2222-222222222222' },
+    { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: 'Alice (Owner - Org A)', role: 'owner', org: '11111111-1111-1111-1111-111111111111' },
+    { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'Bob (Editor - Org A)', role: 'editor', org: '11111111-1111-1111-1111-111111111111' },
+    { id: 'cccccccc-cccc-cccc-cccc-cccccccccccc', name: 'Carol (Viewer - Org A)', role: 'viewer', org: '11111111-1111-1111-1111-111111111111' },
+    { id: 'dddddddd-dddd-dddd-dddd-dddddddddddd', name: 'Dave (Owner - Org B)', role: 'owner', org: '22222222-2222-2222-2222-222222222222' },
   ]
 
   useEffect(() => {
