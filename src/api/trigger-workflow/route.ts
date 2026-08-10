@@ -141,6 +141,8 @@ export async function POST(req: NextRequest) {
     console.log('Created step runs:', stepRunIds)
 
     // Execute steps
+    console.log('Starting executeSteps with', steps.length, 'steps')
+    console.log('Step run IDs:', JSON.stringify(stepRunIds))
     let previousOutput: any = {}
     let shouldContinue = true
 
