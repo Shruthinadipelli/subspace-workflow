@@ -74,6 +74,15 @@ async function callGroq(prompt: string) {
 
 export async function POST(req: NextRequest) {
   try {
+    console.log('ENV CHECK:', {
+      subdomain: process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN,
+      region: process.env.NEXT_PUBLIC_NHOST_REGION,
+      hasSecret: !!process.env.NHOST_ADMIN_SECRET,
+      hasPublicSecret: !!process.env.NEXT_PUBLIC_HASURA_ADMIN_SECRET,
+      hasGroq: !!process.env.GROQ_API_KEY,
+      url: HASURA_URL
+    })
+
     const body = await req.json()
     const { workflow_id, user_id, role, org_id } = body
 
