@@ -56,10 +56,9 @@ export async function POST(req: NextRequest) {
       const srId = stepRunIds[step.id]
 
       await hasura(`
-        mutation($id: uuid!, $t: timestamptz) {
-          update_step_runs_by_pk(pk_columns: { id: $id }, _set: { status: "running", started_at: $t }) { id }
-        }`, { id: srId, t: now() })
-
+        mutation($id: uuid!) {
+          update_step_runs_by_pk(pk_columns: { id: $id }, _set: { status: "running" }) { id }
+        }`, { id: srId })
       let out: any = {}
 
       if (step.step_type === 'llm_call') {
