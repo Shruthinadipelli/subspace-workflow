@@ -3,15 +3,25 @@ import { NextRequest, NextResponse } from 'next/server'
 export const maxDuration = 60
 
 async function hasura(query: string, variables: any = {}) {
-  const url = `https://${process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN}.hasura.${process.env.NEXT_PUBLIC_NHOST_REGION}.nhost.run/v1/graphql`
+  const subdomain = process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN
+  const region = process.env.NEXT_PUBLIC_NHOST_REGION
   const secret = process.env.NHOST_ADMIN_SECRET || process.env.NEXT_PUBLIC_HASURA_ADMIN_SECRET || ''
+  const url = `https://${subdomain}.hasura.${region}.nhost.run/v1/graphql`
+  
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-hasura-admin-secret': secret },
+    headers: { 
+      'Content-Type': 'application/json', 
+      'x-hasura-admin-secret': secret 
+    },
     body: JSON.stringify({ query, variables })
   })
-  const json = await res.json()
-  if (json.errors) throw new Error(json.errors[0]?.message)
+  
+  const text = await res.text()
+  let json: any
+  try { json = JSON.parse(text) } catch { throw new Error(`Invalid JSON: ${text.slice(0, 100)}`) }
+  if (json.errors) throw new Error(json.errors[0]?.message || 'Hasura error')
+  if (!json.data) throw new Error(`No data: ${text.slice(0, 100)}`)
   return json.data
 }
 
