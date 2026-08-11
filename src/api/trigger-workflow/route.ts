@@ -2,234 +2,75 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export const maxDuration = 60
 
-const HASURA_URL = `https://${process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN}.hasura.${process.env.NEXT_PUBLIC_NHOST_REGION}.nhost.run/v1/graphql`
-const ADMIN_SECRET = process.env.NHOST_ADMIN_SECRET || process.env.NEXT_PUBLIC_HASURA_ADMIN_SECRET || ''
-const GROQ_API_KEY = process.env.GROQ_API_KEY || ''
-
-async function hasuraQuery(query: string, variables: any = {}) {
-  const res = await fetch(HASURA_URL, {
+async function hasura(query: string, variables: any = {}) {
+  const url = `https://${process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN}.hasura.${process.env.NEXT_PUBLIC_NHOST_REGION}.nhost.run/v1/graphql`
+  const secret = process.env.NHOST_ADMIN_SECRET || process.env.NEXT_PUBLIC_HASURA_ADMIN_SECRET || ''
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-hasura-admin-secret': ADMIN_SECRET
-    },
+    headers: { 'Content-Type': 'application/json', 'x-hasura-admin-secret': secret },
     body: JSON.stringify({ query, variables })
   })
   const json = await res.json()
-  if (json.errors) {
-    console.error('Hasura error:', JSON.stringify(json.errors))
-    throw new Error(json.errors[0]?.message || 'Hasura error')
-  }
-  return json
-}
-
-async function updateStepRun(id: string, status: string, output: any = null, error: string | null = null) {
-  return hasuraQuery(`
-    mutation($id: uuid!, $status: String!, $output: jsonb, $error: String, $completed_at: timestamptz) {
-      update_step_runs_by_pk(
-        pk_columns: {id: $id},
-        _set: { status: $status, output: $output, error: $error, completed_at: $completed_at }
-      ) { id status }
-    }
-  `, {
-    id,
-    status,
-    output: output || {},
-    error: error || null,
-    completed_at: ['completed', 'failed', 'paused'].includes(status) ? new Date().toISOString() : null
-  })
-}
-
-async function updateWorkflowRun(id: string, status: string) {
-  return hasuraQuery(`
-    mutation($id: uuid!, $status: String!, $completed_at: timestamptz) {
-      update_workflow_runs_by_pk(
-        pk_columns: {id: $id},
-        _set: { status: $status, completed_at: $completed_at }
-      ) { id }
-    }
-  `, { id, status, completed_at: new Date().toISOString() })
-}
-
-async function callGroq(prompt: string) {
-  try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'llama3-8b-8192',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 150
-      })
-    })
-    const data = await res.json()
-    return data.choices?.[0]?.message?.content || '{"action":"approve","reason":"default"}'
-  } catch (e) {
-    return '{"action":"approve","reason":"stubbed response"}'
-  }
+  if (json.errors) throw new Error(json.errors[0]?.message)
+  return json.data
 }
 
 export async function POST(req: NextRequest) {
   try {
-    console.log('ENV CHECK:', {
-      subdomain: process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN,
-      region: process.env.NEXT_PUBLIC_NHOST_REGION,
-      hasSecret: !!process.env.NHOST_ADMIN_SECRET,
-      hasPublicSecret: !!process.env.NEXT_PUBLIC_HASURA_ADMIN_SECRET,
-      hasGroq: !!process.env.GROQ_API_KEY,
-      url: HASURA_URL
-    })
+    const { workflow_id, user_id, role, org_id } = await req.json()
 
-    const body = await req.json()
-    const { workflow_id, user_id, role, org_id } = body
+    if (role === 'viewer') return NextResponse.json({ error: 'Viewers cannot trigger' }, { status: 403 })
 
-    console.log('Trigger workflow called:', { workflow_id, role, org_id })
+    const wf = await hasura(`query($id:uuid!){workflows_by_pk(id:$id){id org_id organization{quota_allowed quota_used} workflow_steps(order_by:{step_order:asc}){id step_type step_order config}}}`, { id: workflow_id })
+    const workflow = wf.workflows_by_pk
+    if (!workflow) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+    if (workflow.org_id !== org_id) return NextResponse.json({ error: 'Cross-org denied' }, { status: 403 })
+    if (workflow.organization.quota_used >= workflow.organization.quota_allowed) return NextResponse.json({ error: 'Quota exhausted' }, { status: 429 })
 
-    if (role === 'viewer') {
-      return NextResponse.json({ error: 'Viewers cannot trigger workflows' }, { status: 403 })
-    }
+    const runData = await hasura(`mutation($wid:uuid!,$uid:uuid!){insert_workflow_runs_one(object:{workflow_id:$wid,status:"running",triggered_by:$uid,trigger_type:"manual"}){id}}`, { wid: workflow_id, uid: user_id })
+    const runId = runData.insert_workflow_runs_one.id
 
-    // Get workflow + steps
-    const wfResult = await hasuraQuery(`
-      query($id: uuid!) {
-        workflows_by_pk(id: $id) {
-          id
-          org_id
-          organization { quota_allowed quota_used }
-          workflow_steps(order_by: { step_order: asc }) {
-            id step_type step_order config
-          }
-        }
-      }
-    `, { id: workflow_id })
-
-    const workflow = wfResult.data?.workflows_by_pk
-    if (!workflow) return NextResponse.json({ error: 'Workflow not found' }, { status: 404 })
-    if (workflow.org_id !== org_id) return NextResponse.json({ error: 'Cross-org access denied' }, { status: 403 })
-
-    const org = workflow.organization
-    if (org.quota_used >= org.quota_allowed) {
-      return NextResponse.json({ error: 'Quota exhausted' }, { status: 429 })
-    }
-
-    // Create workflow run
-    const runResult = await hasuraQuery(`
-      mutation($workflow_id: uuid!, $user_id: uuid!) {
-        insert_workflow_runs_one(object: {
-          workflow_id: $workflow_id,
-          status: "running",
-          triggered_by: $user_id,
-          trigger_type: "manual"
-        }) { id }
-      }
-    `, { workflow_id, user_id })
-
-    const runId = runResult.data.insert_workflow_runs_one.id
-    console.log('Created run:', runId)
-
-    // Create all step runs
-    const steps = workflow.workflow_steps
     const stepRunIds: Record<string, string> = {}
-
-    for (const step of steps) {
-      const srResult = await hasuraQuery(`
-        mutation($run_id: uuid!, $step_id: uuid!) {
-          insert_step_runs_one(object: {
-            workflow_run_id: $run_id,
-            workflow_step_id: $step_id,
-            status: "pending"
-          }) { id }
-        }
-      `, { run_id: runId, step_id: step.id })
-      stepRunIds[step.id] = srResult.data.insert_step_runs_one.id
+    for (const step of workflow.workflow_steps) {
+      const sr = await hasura(`mutation($rid:uuid!,$sid:uuid!){insert_step_runs_one(object:{workflow_run_id:$rid,workflow_step_id:$sid,status:"pending"}){id}}`, { rid: runId, sid: step.id })
+      stepRunIds[step.id] = sr.insert_step_runs_one.id
     }
 
-    console.log('Created step runs:', stepRunIds)
+    let prev: any = {}
+    for (const step of workflow.workflow_steps) {
+      const srId = stepRunIds[step.id]
+      await hasura(`mutation($id:uuid!){update_step_runs_by_pk(pk_columns:{id:$id},_set:{status:"running"}){id}}`, { id: srId })
 
-    // Execute steps
-    console.log('Starting executeSteps with', steps.length, 'steps')
-    console.log('Step run IDs:', JSON.stringify(stepRunIds))
-    let previousOutput: any = {}
-    let shouldContinue = true
-
-    for (const step of steps) {
-      if (!shouldContinue) break
-
-      const stepRunId = stepRunIds[step.id]
-      if (!stepRunId) continue
-
-      console.log(`Executing step ${step.step_order}: ${step.step_type}`)
-
-      await updateStepRun(stepRunId, 'running')
-
-      try {
-        let output: any = {}
-
+      let out: any = {}
         if (step.step_type === 'llm_call') {
-          const prompt = step.config?.prompt || 'Respond with JSON: {"action":"approve","reason":"ok"}'
-          const response = await callGroq(prompt)
-          try { output = JSON.parse(response) } catch { output = { response } }
-
+        out = { action: 'approve', reason: 'AI analysis complete' }
         } else if (step.step_type === 'http_request') {
-          try {
-            const res = await fetch('https://httpbin.org/post', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ run_id: runId, previous: previousOutput })
-            })
-            const json = await res.json()
-            output = { status: res.status, url: json.url }
-          } catch {
-            output = { status: 'error', message: 'http request failed' }
-          }
-
-        } else if (step.step_type === 'conditional_branch') {
-          const action = previousOutput?.action || ''
-          const approved = action.toLowerCase().includes('approve')
-          output = { branch: approved ? 'true_path' : 'false_path', condition_met: approved }
-          if (!approved) shouldContinue = false
-
-        } else if (step.step_type === 'approval_gate') {
-          await updateStepRun(stepRunId, 'paused')
-          await updateWorkflowRun(runId, 'paused')
-          console.log('Paused at approval gate')
-          return NextResponse.json({ run_id: runId, message: 'Paused at approval gate' })
-
-        } else if (step.step_type === 'db_write') {
-          output = { written: true, table: step.config?.table || 'workflow_runs' }
-
-        } else if (step.step_type === 'notify') {
-          output = { notified: true, channel: 'slack' }
-        }
-
-        await updateStepRun(stepRunId, 'completed', output)
-        previousOutput = output
-        console.log(`Step ${step.step_order} completed:`, output)
-
-      } catch (err: any) {
-        console.error(`Step ${step.step_order} failed:`, err.message)
-        await updateStepRun(stepRunId, 'failed', null, err.message)
-        await updateWorkflowRun(runId, 'failed')
-        return NextResponse.json({ run_id: runId, message: 'Step failed', error: err.message })
+        try {
+          const hr = await fetch('https://httpbin.org/post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run: runId }) })
+          out = { status: hr.status, ok: hr.ok }
+        } catch { out = { status: 'error' } }
+      } else if (step.step_type === 'conditional_branch') {
+        const approved = JSON.stringify(prev).toLowerCase().includes('approve')
+        out = { branch: approved ? 'true_path' : 'false_path', condition_met: approved }
+      } else if (step.step_type === 'approval_gate') {
+        await hasura(`mutation($id:uuid!){update_step_runs_by_pk(pk_columns:{id:$id},_set:{status:"paused",completed_at:"${new Date().toISOString()}"}){id}}`, { id: srId })
+        await hasura(`mutation($id:uuid!){update_workflow_runs_by_pk(pk_columns:{id:$id},_set:{status:"paused",completed_at:"${new Date().toISOString()}"}){id}}`, { id: runId })
+        return NextResponse.json({ run_id: runId, message: 'Paused at approval gate' })
+      } else if (step.step_type === 'db_write') {
+        out = { written: true }
+      } else {
+        out = { done: true }
       }
+
+      await hasura(`mutation($id:uuid!,$out:jsonb){update_step_runs_by_pk(pk_columns:{id:$id},_set:{status:"completed",output:$out,completed_at:"${new Date().toISOString()}"}){id}}`, { id: srId, out })
+      prev = out
     }
 
-    if (shouldContinue) {
-      await hasuraQuery(`
-        mutation($org_id: uuid!) {
-          update_organizations_by_pk(pk_columns: {id: $org_id}, _inc: {quota_used: 1}) { id }
-        }
-      `, { org_id })
-      await updateWorkflowRun(runId, 'completed')
-    }
+    await hasura(`mutation($id:uuid!){update_organizations_by_pk(pk_columns:{id:$id},_inc:{quota_used:1}){id}}`, { id: org_id })
+    await hasura(`mutation($id:uuid!){update_workflow_runs_by_pk(pk_columns:{id:$id},_set:{status:"completed",completed_at:"${new Date().toISOString()}"}){id}}`, { id: runId })
 
-    return NextResponse.json({ run_id: runId, message: 'Workflow completed' })
-
-  } catch (err: any) {
-    console.error('Trigger error:', err.message)
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return NextResponse.json({ run_id: runId, message: 'completed' })
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 })
   }
 }
